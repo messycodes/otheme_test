@@ -9,14 +9,14 @@ interface IFileService {
     String backupTheme(String backupPath) = 1;
     
     /**
-     * 安装主题从指定路径（覆盖安装）
+     * 安装主题从指定路径（多主题模式，自动编号）
      * @param themePath 主题文件路径
      * @return 错误信息，成功则返回 null
      */
     String installTheme(String themePath) = 2;
     
     /**
-     * 安装主题从文件描述符（跨进程，覆盖安装）
+     * 安装主题从文件描述符（多主题模式，自动编号）
      * @param pfd 主题文件的 ParcelFileDescriptor
      * @return 错误信息，成功则返回 null
      */
@@ -27,6 +27,20 @@ interface IFileService {
      * @return 文件列表
      */
     List<String> getThemeInfo() = 3;
+    
+    /**
+     * 获取所有主题及其信息（JSON 格式）
+     * 格式: [{"name":"theme_1.theme","info":"<Author>...</Author>..."}, ...]
+     * @return JSON 数组字符串，失败返回 null
+     */
+    String getThemeListWithInfo() = 10;
+    
+    /**
+     * 删除指定主题文件
+     * @param themeFileName 主题文件名（如 theme_1.theme）
+     * @return 错误信息，成功则返回 null
+     */
+    String deleteTheme(String themeFileName) = 11;
     
     /**
      * 获取已安装主题的 themeInfo.xml 内容
@@ -49,7 +63,7 @@ interface IFileService {
     boolean isPackageInstalled(String packageName) = 8;
     
     /**
-     * 卸载主题（删除主题文件，保留 config 文件）
+     * 卸载所有主题模块（恢复默认）
      * @return 错误信息，成功则返回 null
      */
     String uninstallTheme() = 9;
