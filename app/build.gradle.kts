@@ -107,6 +107,9 @@ dependencies {
     implementation(libs.androidx.navigation.runtime.android)
     // AboutLibraries
     implementation(libs.aboutlibraries.core)
+    // Apache Commons Compress: explicit ZIP encoding control and robust ZIP handling
+    implementation("org.apache.commons:commons-compress:1.23.0")
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
