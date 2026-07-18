@@ -5,11 +5,15 @@ import android.content.pm.PackageManager
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 
 class FileService(private val context: Context) : IFileService.Stub() {
 
@@ -42,7 +46,7 @@ class FileService(private val context: Context) : IFileService.Stub() {
 
     override fun backupTheme(backupPath: String): String? {
         Log.d(TAG, "Backing up theme to: $backupPath")
-        
+
         return try {
             val themeDir = File(THEME_DIR)
             if (!themeDir.exists() || !themeDir.isDirectory) {
@@ -54,14 +58,27 @@ class FileService(private val context: Context) : IFileService.Stub() {
             val backupFile = File(backupPath)
             backupFile.parentFile?.mkdirs()
 
-            ZipOutputStream(FileOutputStream(backupFile)).use { zos ->
-                // 直接备份文件夹内容，不包含 theme 文件夹本身
-                themeDir.listFiles()?.forEach { file ->
-                    zipFile(file, file.name, zos)
+            // Use Apache Commons Compress to explicitly control filename encoding and unicode extra fields.
+            FileOutputStream(backupFile).use { fos ->
+                BufferedOutputStream(fos).use { bos ->
+                    ZipArchiveOutputStream(bos).use { zaos ->
+                        // Prefer UTF-8 names and include unicode extra fields for maximum compatibility
+                        zaos.setEncoding("UTF-8")
+                        zaos.setUseLanguageEncodingFlag(true)
+                        zaos.setCreateUnicodeExtraFields(ZipArchiveOutputStream.UnicodeExtraFieldPolicy.ALWAYS)
+
+                        // Recursively add files
+                        themeDir.listFiles()?.forEach { file ->
+                            zipFileCommons(file, file.name, zaos)
+                        }
+
+                        // Ensure everything is written
+                        zaos.finish()
+                    }
                 }
             }
 
-            Log.d(TAG, "Theme backup completed successfully")
+            Log.d(TAG, "Theme backup completed successfully: ${backupFile.absolutePath} -> size=${backupFile.length()}")
             null // Success
         } catch (e: Exception) {
             val error = "Error backing up theme: ${e.message}"
@@ -141,22 +158,22 @@ class FileService(private val context: Context) : IFileService.Stub() {
 
     override fun getThemeInfo(): List<String> {
         Log.d(TAG, "Getting theme info")
-        
+
         return try {
             val themeDir = File(THEME_DIR)
-            
+
             if (!themeDir.exists() || !themeDir.isDirectory) {
                 Log.e(TAG, "Theme directory does not exist")
                 return emptyList()
             }
-            
+
             val fileList = mutableListOf<String>()
             themeDir.walkTopDown().forEach { file ->
                 if (file.isFile) {
                     fileList.add(file.absolutePath)
                 }
             }
-            
+
             Log.d(TAG, "Found ${fileList.size} files in theme directory")
             fileList
         } catch (e: Exception) {
@@ -167,15 +184,15 @@ class FileService(private val context: Context) : IFileService.Stub() {
 
     override fun getInstalledThemeInfo(): String? {
         Log.d(TAG, "Getting installed theme info")
-        
+
         return try {
             val themeInfoFile = File(THEME_DIR, "themeInfo.xml")
-            
+
             if (!themeInfoFile.exists() || !themeInfoFile.isFile) {
                 Log.e(TAG, "themeInfo.xml does not exist")
                 return null
             }
-            
+
             val content = themeInfoFile.readText()
             Log.d(TAG, "Read themeInfo.xml, size: ${content.length} bytes")
             content
@@ -184,11 +201,11 @@ class FileService(private val context: Context) : IFileService.Stub() {
             null
         }
     }
-    
+
     override fun isPackageInstalled(packageName: String): Boolean {
         return try {
             Log.d(TAG, "Checking if package is installed: $packageName")
-            
+
             // 方法1: pm path
             val process = Runtime.getRuntime().exec("pm path $packageName")
             val output = process.inputStream.bufferedReader().readText()
@@ -197,7 +214,7 @@ class FileService(private val context: Context) : IFileService.Stub() {
                 Log.d(TAG, "Package $packageName found via pm path")
                 return true
             }
-            
+
             // 方法2: 兜底 — Android 原生 PackageManager API
             try {
                 val info = context.packageManager.getPackageInfo(packageName, 0)
@@ -206,7 +223,7 @@ class FileService(private val context: Context) : IFileService.Stub() {
             } catch (_: PackageManager.NameNotFoundException) {
                 Log.d(TAG, "Package $packageName not found via PackageManager API")
             }
-            
+
             Log.d(TAG, "Package $packageName NOT installed")
             false
         } catch (e: Exception) {
@@ -220,14 +237,14 @@ class FileService(private val context: Context) : IFileService.Stub() {
             false
         }
     }
-    
+
     override fun restartProcesses(packages: List<String>): String? {
         Log.d(TAG, "===== Starting hot reboot =====")
 
         return try {
             val process = Runtime.getRuntime().exec("am restart")
             val exitCode = process.waitFor()
-            
+
             if (exitCode == 0) {
                 Log.d(TAG, "Hot reboot triggered successfully")
                 null
@@ -245,11 +262,11 @@ class FileService(private val context: Context) : IFileService.Stub() {
 
     override fun uninstallTheme(): String? {
         Log.d(TAG, "===== Uninstalling theme =====")
-        
+
         return try {
             val dir = File(THEME_DIR)
             if (dir.exists() && dir.isDirectory) {
-                dir.listFiles()?.filter { it.name != "config" && it.name != "applying" }?.forEach { 
+                dir.listFiles()?.filter { it.name != "config" && it.name != "applying" }?.forEach {
                     val deleted = it.deleteRecursively()
                     Log.d(TAG, "Deleted ${it.absolutePath}: $deleted")
                 }
@@ -274,7 +291,7 @@ class FileService(private val context: Context) : IFileService.Stub() {
             val entry = ZipEntry("$zipPath/")
             zos.putNextEntry(entry)
             zos.closeEntry()
-            
+
             // 递归处理子文件
             file.listFiles()?.forEach { child ->
                 zipFile(child, "$zipPath/${child.name}", zos)
@@ -291,6 +308,29 @@ class FileService(private val context: Context) : IFileService.Stub() {
                 }
             }
             zos.closeEntry()
+        }
+    }
+
+    private fun zipFileCommons(file: File, zipPath: String, zaos: ZipArchiveOutputStream) {
+        if (file.isDirectory) {
+            val dirName = if (zipPath.endsWith("/")) zipPath else "$zipPath/"
+            val entry = ZipArchiveEntry(dirName)
+            zaos.putArchiveEntry(entry)
+            zaos.closeArchiveEntry()
+
+            file.listFiles()?.forEach { child ->
+                zipFileCommons(child, "$zipPath/${child.name}", zaos)
+            }
+        } else {
+            // Create entry with the provided name and set size to improve compatibility
+            val entry = ZipArchiveEntry(file, zipPath)
+            entry.size = file.length()
+            zaos.putArchiveEntry(entry)
+            FileInputStream(file).use { fis ->
+                fis.copyTo(zaos, BUFFER_SIZE)
+            }
+            zaos.closeArchiveEntry()
+            Log.d(TAG, "Added zip entry: $zipPath (size=${file.length()})")
         }
     }
 }
