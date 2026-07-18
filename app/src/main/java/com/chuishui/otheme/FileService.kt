@@ -16,6 +16,8 @@ import java.util.zip.ZipOutputStream
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 import org.apache.commons.compress.archivers.zip.ZipFile
+import org.json.JSONArray
+import org.json.JSONObject
 
 class FileService(private val context: Context) : IFileService.Stub() {
 
@@ -43,6 +45,26 @@ class FileService(private val context: Context) : IFileService.Stub() {
         } catch (e: Exception) {
             Pair(-1, e.message ?: "Unknown error")
         }
+    }
+
+    /**
+     * 获取下一个可用的主题编号（theme_1, theme_2, theme_3...）
+     */
+    private fun getNextThemeNumber(): Int {
+        val themeDir = File(THEME_INNER_DIR)
+        if (!themeDir.exists()) {
+            return 1
+        }
+
+        val existingNumbers = themeDir.listFiles()
+            ?.filter { it.name.matches(Regex("theme_\\d+\\.theme")) }
+            ?.mapNotNull { file ->
+                file.name.replace(Regex("[^0-9]"), "").toIntOrNull()
+            }
+            ?.sorted()
+            ?: emptyList()
+
+        return if (existingNumbers.isEmpty()) 1 else existingNumbers.last() + 1
     }
 
     override fun destroy() {
@@ -97,14 +119,15 @@ class FileService(private val context: Context) : IFileService.Stub() {
     }
 
     /**
-     * 安装主题为 Magisk 模块
+     * 安装主题为 Magisk 模块（多主题模式，自动编号）
      *
      * 将 .theme 文件注入到 Magisk 模块 (/data/adb/modules/otheme)，
+     * 支持多个主题同时并存（theme_1.theme, theme_2.theme...）
      * 通过 post-fs-data.sh 中的 mount --bind 绑定挂载来实现主题注入。
      * 兼容 Android 12+、EROFS、AVB 等。
      */
     override fun installTheme(themePath: String): String? {
-        Log.d(TAG, "Installing theme module: $themePath")
+        Log.d(TAG, "Installing theme module (multi-theme mode): $themePath")
 
         return try {
             val themeFile = File(themePath)
@@ -150,13 +173,15 @@ mount --bind ${"$"}MODDIR/system_ext/media/themeInner/ /system_ext/media/themeIn
             execShellCommand("mkdir -p '$THEME_INNER_DIR'")
             Log.d(TAG, "Theme directory created/verified")
 
-            // 只删除当前要安装的主题文件（避免误删其他主题）
-            val targetPath = "$THEME_INNER_DIR/${themeFile.name}"
-            execShellCommand("rm -f '$targetPath'")
-            Log.d(TAG, "Removed existing theme file: ${themeFile.name}")
+            // 获取下一个主题编号
+            val nextNumber = getNextThemeNumber()
+            val themeName = "theme_$nextNumber.theme"
+            val targetPath = "$THEME_INNER_DIR/$themeName"
+
+            Log.d(TAG, "Next theme number: $nextNumber, target name: $themeName")
 
             // 复制主题文件到临时位置
-            val tempPath = "/data/local/tmp/${themeFile.name}"
+            val tempPath = "/data/local/tmp/$themeName"
             themeFile.copyTo(File(tempPath), overwrite = true)
             Log.d(TAG, "Copied to temp: $tempPath")
 
@@ -177,7 +202,7 @@ mount --bind ${"$"}MODDIR/system_ext/media/themeInner/ /system_ext/media/themeIn
                 execShellCommand("am force-stop $pkg")
             }
 
-            Log.d(TAG, "Theme installed to Magisk module: $targetPath")
+            Log.d(TAG, "Theme installed to Magisk module: $targetPath (as $themeName)")
             null
 
         } catch (e: Exception) {
@@ -303,6 +328,106 @@ mount --bind ${"$"}MODDIR/system_ext/media/themeInner/ /system_ext/media/themeIn
         }
     }
 
+    /**
+     * 获取所有主题及其信息（JSON 格式，动态解压）
+     * 只提取每个 .theme 文件内的 themeInfo.xml，返回 JSON 数组
+     */
+    override fun getThemeListWithInfo(): String? {
+        Log.d(TAG, "Getting theme list with info (dynamic unzip)")
+
+        return try {
+            val themeDir = File(THEME_INNER_DIR)
+
+            if (!themeDir.exists() || !themeDir.isDirectory) {
+                Log.d(TAG, "Magisk theme directory does not exist")
+                return null
+            }
+
+            val themeList = themeDir.listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".theme", ignoreCase = true) }
+                ?.sortedBy { it.name }
+                ?: emptyList()
+
+            if (themeList.isEmpty()) {
+                Log.d(TAG, "No theme files found")
+                return null
+            }
+
+            val jsonArray = JSONArray()
+
+            themeList.forEach { themeFile ->
+                try {
+                    ZipFile(themeFile).use { zip ->
+                        val entry = zip.getEntry("themeInfo.xml")
+                        if (entry != null) {
+                            val themeInfoContent = zip.getInputStream(entry).bufferedReader().readText()
+                            val jsonObj = JSONObject()
+                            jsonObj.put("name", themeFile.name)
+                            jsonObj.put("info", themeInfoContent)
+                            jsonObj.put("size", themeFile.length())
+                            jsonArray.put(jsonObj)
+                            Log.d(TAG, "Added theme: ${themeFile.name}")
+                        } else {
+                            Log.w(TAG, "No themeInfo.xml found in ${themeFile.name}")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error processing theme ${themeFile.name}: ${e.message}", e)
+                }
+            }
+
+            Log.d(TAG, "Theme list JSON: ${jsonArray.toString()}")
+            jsonArray.toString()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting theme list with info: ${e.message}", e)
+            null
+        }
+    }
+
+    /**
+     * 删除指定主题文件
+     * 如果模块内无主题后，自动清理 otheme 模块
+     */
+    override fun deleteTheme(themeFileName: String): String? {
+        Log.d(TAG, "Deleting theme: $themeFileName")
+
+        return try {
+            val targetPath = "$THEME_INNER_DIR/$themeFileName"
+            
+            // 删除文件
+            execShellCommand("rm -f '$targetPath'")
+            Log.d(TAG, "Deleted theme file: $targetPath")
+
+            // 检查是否还有其他主题
+            val themeDir = File(THEME_INNER_DIR)
+            val remainingThemes = themeDir.listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".theme", ignoreCase = true) }
+                ?.size ?: 0
+
+            if (remainingThemes == 0) {
+                Log.d(TAG, "No remaining themes, cleaning up otheme module...")
+                // 创建 remove 标记，Magisk 下次启动删除
+                execShellCommand("touch '$MODULE_DIR/remove'")
+                Log.d(TAG, "Created remove marker for Magisk module")
+            }
+
+            // 关闭主题应用以刷新
+            listOf(
+                "com.heytap.themestore",
+                "com.oplus.themestore",
+                "com.coloros.themestore"
+            ).forEach { pkg ->
+                execShellCommand("am force-stop $pkg")
+            }
+
+            null
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Delete failed", e)
+            "Delete failed: ${e.message}"
+        }
+    }
+
     override fun getInstalledThemeInfo(): String? {
         Log.d(TAG, "Getting installed theme info")
 
@@ -382,7 +507,7 @@ mount --bind ${"$"}MODDIR/system_ext/media/themeInner/ /system_ext/media/themeIn
     }
 
     override fun uninstallTheme(): String? {
-        Log.d(TAG, "===== Uninstalling theme =====")
+        Log.d(TAG, "===== Uninstalling theme (restore default) =====")
 
         return try {
             // 创建 remove 标记文件，让 Magisk 下次启动时删除模块
