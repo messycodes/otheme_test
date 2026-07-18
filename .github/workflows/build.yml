@@ -1,45 +1,43 @@
-name: Unzip And Push Source
+name: Build Android APK
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
+  push:
+    branches:
+      - main
 
 jobs:
-  unzip:
+  build:
     runs-on: ubuntu-latest
 
     steps:
+      # 拉取代码
       - name: Checkout
         uses: actions/checkout@v4
 
 
-      - name: Extract ZIP
-        run: |
-          unzip -o OThemezip.zip -d temp
-
-          # 如果多一层目录，自动移动出来
-          if [ -d "temp/OThemezip" ]; then
-            cp -r temp/OThemezip/* .
-            cp -r temp/OThemezip/.[!.]* . 2>/dev/null || true
-          else
-            cp -r temp/* .
-          fi
-
-          rm -rf temp
-          rm -f OThemezip.zip
-
-          ls -la
+      # Java环境
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
 
-      - name: Commit Changes
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
+      # Gradle权限
+      - name: Grant permission
+        run: chmod +x gradlew
 
-          git add .
 
-          git commit -m "Auto extract source from zip" || echo "No changes"
+      # 编译Release
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
 
-          git push
+
+      # 上传APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: OTheme-release
+          path: |
+            app/build/outputs/apk/release/*.apk
