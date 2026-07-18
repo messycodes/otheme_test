@@ -69,16 +69,15 @@ class FileService(private val context: Context) : IFileService.Stub() {
                         zaos.setUseLanguageEncodingFlag(true)
                         zaos.setCreateUnicodeExtraFields(ZipArchiveOutputStream.UnicodeExtraFieldPolicy.ALWAYS)
 
-                        // Recursively add files
-                        val basePath = themeDir.toPath()
+                        // Recursively add files using URI relativize to avoid extra top-level directory
+                        val baseUri = themeDir.toURI()
                         themeDir.walkTopDown().forEach { file ->
                             if (file == themeDir) return@forEach
-                            val relPath = basePath.relativize(file.toPath()).toString().replace(File.separatorChar, '/')
+                            val relPath = baseUri.relativize(file.toURI()).path.replace(File.separatorChar, '/')
                             if (relPath.isEmpty()) return@forEach
                             zipFileCommons(file, relPath, zaos)
                         }
 
-                        // Ensure everything is written
                         zaos.finish()
                     }
                 }
@@ -170,7 +169,8 @@ class FileService(private val context: Context) : IFileService.Stub() {
                 try {
                     ZipFile(tempZip, enc).use { zf ->
                         val entries = zf.entries
-                        for (entry in entries) {
+                        while (entries.hasMoreElements()) {
+                            val entry = entries.nextElement()
                             val name = entry.name.replace('\\', '/')
                             // Normalize name and look for .theme entries anywhere
                             if (name.endsWith(".theme", ignoreCase = true)) {
@@ -243,4 +243,164 @@ class FileService(private val context: Context) : IFileService.Stub() {
                 }
             }
 
-        ... (truncated for brevity)
+            Log.d(TAG, "Found ${fileList.size} files in theme directory")
+            fileList
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting theme info: ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    override fun getInstalledThemeInfo(): String? {
+        Log.d(TAG, "Getting installed theme info")
+
+        return try {
+            val themeInfoFile = File(THEME_DIR, "themeInfo.xml")
+
+            if (!themeInfoFile.exists() || !themeInfoFile.isFile) {
+                Log.e(TAG, "themeInfo.xml does not exist")
+                return null
+            }
+
+            val content = themeInfoFile.readText()
+            Log.d(TAG, "Read themeInfo.xml, size: ${content.length} bytes")
+            content
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading themeInfo.xml: ${e.message}", e)
+            null
+        }
+    }
+
+    override fun isPackageInstalled(packageName: String): Boolean {
+        return try {
+            Log.d(TAG, "Checking if package is installed: $packageName")
+
+            // 方法1: pm path
+            val process = Runtime.getRuntime().exec("pm path $packageName")
+            val output = process.inputStream.bufferedReader().readText()
+            val exitCode = process.waitFor()
+            if (exitCode == 0 && output.contains(packageName)) {
+                Log.d(TAG, "Package $packageName found via pm path")
+                return true
+            }
+
+            // 方法2: 兜底 — Android 原生 PackageManager API
+            try {
+                val info = context.packageManager.getPackageInfo(packageName, 0)
+                Log.d(TAG, "Package $packageName found via PackageManager API, version: ${info.versionName}")
+                return true
+            } catch (_: PackageManager.NameNotFoundException) {
+                Log.d(TAG, "Package $packageName not found via PackageManager API")
+            }
+
+            Log.d(TAG, "Package $packageName NOT installed")
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking package installation: ${e.message}", e)
+            // 异常时最后尝试原生 API
+            try {
+                val info = context.packageManager.getPackageInfo(packageName, 0)
+                Log.d(TAG, "Package $packageName found via fallback PackageManager API")
+                return true
+            } catch (_: PackageManager.NameNotFoundException) { }
+            false
+        }
+    }
+
+    override fun restartProcesses(packages: List<String>): String? {
+        Log.d(TAG, "===== Starting hot reboot =====")
+
+        return try {
+            val process = Runtime.getRuntime().exec("am restart")
+            val exitCode = process.waitFor()
+
+            if (exitCode == 0) {
+                Log.d(TAG, "Hot reboot triggered successfully")
+                null
+            } else {
+                val error = "Hot reboot failed with exit code: $exitCode"
+                Log.e(TAG, error)
+                error
+            }
+        } catch (e: Exception) {
+            val error = "Hot reboot failed: ${e.message}"
+            Log.e(TAG, error, e)
+            error
+        }
+    }
+
+    override fun uninstallTheme(): String? {
+        Log.d(TAG, "===== Uninstalling theme =====")
+
+        return try {
+            val dir = File(THEME_DIR)
+            if (dir.exists() && dir.isDirectory) {
+                dir.listFiles()?.filter { it.name != "config" && it.name != "applying" }?.forEach {
+                    val deleted = it.deleteRecursively()
+                    Log.d(TAG, "Deleted ${it.absolutePath}: $deleted")
+                }
+            }
+            // 确保 applying 目录存在
+            val applyingDir = File(THEME_DIR, "applying")
+            if (!applyingDir.exists()) {
+                applyingDir.mkdirs()
+            }
+            Log.d(TAG, "Theme uninstalled successfully (config and applying preserved)")
+            null
+        } catch (e: Exception) {
+            val error = "Uninstall failed: ${e.message}"
+            Log.e(TAG, error, e)
+            error
+        }
+    }
+
+    private fun zipFile(file: File, zipPath: String, zos: ZipOutputStream) {
+        if (file.isDirectory) {
+            // 添加目录条目
+            val entry = ZipEntry("$zipPath/")
+            zos.putNextEntry(entry)
+            zos.closeEntry()
+
+            // 递归处理子文件
+            file.listFiles()?.forEach { child ->
+                zipFile(child, "$zipPath/${child.name}", zos)
+            }
+        } else {
+            // 添加文件
+            val entry = ZipEntry(zipPath)
+            zos.putNextEntry(entry)
+            FileInputStream(file).use { fis ->
+                val buffer = ByteArray(BUFFER_SIZE)
+                var len: Int
+                while (fis.read(buffer).also { len = it } > 0) {
+                    zos.write(buffer, 0, len)
+                }
+            }
+            zos.closeEntry()
+        }
+    }
+
+    private fun zipFileCommons(file: File, zipPath: String, zaos: ZipArchiveOutputStream) {
+        if (file.isDirectory) {
+            val dirName = if (zipPath.endsWith("/")) zipPath else "$zipPath/"
+            val entry = ZipArchiveEntry(dirName)
+            zaos.putArchiveEntry(entry)
+            zaos.closeArchiveEntry()
+
+            file.listFiles()?.forEach { child ->
+                val childRel = if (zipPath.isEmpty()) child.name else "$zipPath/${child.name}"
+                zipFileCommons(child, childRel, zaos)
+            }
+        } else {
+            // Create entry with the provided name and set size to improve compatibility
+            val entry = ZipArchiveEntry(file, zipPath)
+            entry.size = file.length()
+            zaos.putArchiveEntry(entry)
+            FileInputStream(file).use { fis ->
+                fis.copyTo(zaos, BUFFER_SIZE)
+            }
+            zaos.closeArchiveEntry()
+            Log.d(TAG, "Added zip entry: $zipPath (size=${file.length()})")
+        }
+    }
+}
